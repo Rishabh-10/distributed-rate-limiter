@@ -1,0 +1,85 @@
+# Distributed rate limiter configuration.
+#
+# The quota table below is hot-reloaded: edit it while the service is running
+# and the new limits take effect within a fraction of a second. A file that
+# fails to parse or validate is logged and ignored, leaving the previous quotas
+# in force.
+
+server:
+  addr: ":8080"
+  read_timeout: 5s
+  write_timeout: 10s
+  idle_timeout: 60s
+  shutdown_grace: 10s
+
+redis:
+  addr: "localhost:6379"
+  db: 0
+  # Bounds a single Redis round trip. Kept small on purpose: a rate limiter
+  # that waits on a struggling Redis has become the outage it exists to avoid.
+  command_timeout: 50ms
+  dial_timeout: 200ms
+  pool_size: 50
+  key_prefix: "rl"
+
+log:
+  level: info
+  format: json
+
+limiter:
+  # Allow requests through when Redis cannot be reached. Enforcement is given
+  # up deliberately and the decision is flagged `degraded` in the response.
+  fail_open: true
+
+  # When false, a rejected request is removed from the window again, so a
+  # client hammering a closed door does not extend its own lockout. Set to true
+  # to make sustained abuse cost the abuser.
+  count_rejected: false
+
+  # Bounds a whole decision, which can take more than one Redis round trip.
+  decision_timeout: 150ms
+
+  breaker:
+    # Consecutive failures before Redis is skipped entirely. Without this,
+    # every request during an outage waits out the full command timeout.
+    failure_threshold: 5
+    open_for: 5s
+
+  # Applies when nothing more specific matches. Every other rule inherits the
+  # fields it does not set from here.
+  default:
+    algorithm: sliding_window
+    limit: 100
+    window: 1m
+
+  # Per-client quotas. `window` and `algorithm` are inherited when omitted.
+  clients:
+    acme-corp:
+      limit: 1000
+      window: 1m
+    free-tier:
+      limit: 10
+      window: 1m
+    # Token bucket instead: a steady 100/minute, but up to 30 may be spent at
+    # once. Choose this for clients whose traffic is bursty by nature, and for
+    # very high-volume clients — it stores two numbers rather than one entry
+    # per request.
+    bursty-client:
+      algorithm: token_bucket
+      limit: 100
+      window: 1m
+      burst: 30
+
+  # Per-resource quotas, used when the client has no rule of its own.
+  resources:
+    "/v1/search":
+      limit: 5
+      window: 1s
+
+  # Most specific: one client on one resource. Use these to combine a client
+  # tier with a route limit, since a client rule otherwise wins outright.
+  overrides:
+    - client: acme-corp
+      resource: "/v1/search"
+      limit: 50
+      window: 1s

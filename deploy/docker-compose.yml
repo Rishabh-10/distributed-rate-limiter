@@ -1,0 +1,63 @@
+# Runs the whole system: Redis, the limiter, and a demo app behind it.
+#
+#   docker compose -f deploy/docker-compose.yml up --build
+#
+# Then watch the limit bite:
+#
+#   for i in $(seq 1 15); do \
+#     curl -s -o /dev/null -w "%{http_code} " localhost:8081/api/hello \
+#       -H "X-Client-ID: free-tier"; done
+#
+# free-tier is capped at 10/minute in configs/config.yaml, so this prints ten
+# 200s followed by five 429s.
+
+services:
+  redis:
+    image: redis:7-alpine
+    # No persistence: rate limit state is worthless after a restart, and
+    # writing it to disk would only add latency to every request.
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      # Published on 6380 so a Redis you already run locally on the standard
+      # port is left alone. The limiter reaches it over the compose network,
+      # so this mapping is only for poking at it with redis-cli.
+      - "6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 10
+
+  limiter:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      args:
+        CMD: ratelimiterd
+    environment:
+      REDIS_ADDR: "redis:6379"
+      RATELIMITER_ADDR: ":8080"
+    ports:
+      - "8080:8080"
+    volumes:
+      # Mounted rather than baked in, so quota edits on the host hot-reload in
+      # the running container. See the README for the caveat about file-change
+      # events on Docker Desktop bind mounts.
+      - ../configs:/etc/ratelimiter:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  demoapp:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      args:
+        CMD: demoapp
+    command: ["-addr", ":8081", "-limiter", "http://limiter:8080"]
+    environment:
+      LIMITER_URL: "http://limiter:8080"
+    ports:
+      - "8081:8081"
+    depends_on:
+      - limiter
